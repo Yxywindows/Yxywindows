@@ -5,5 +5,15 @@
 <br />
 
 <div align="center">
-  <img src="./profile-3d-contrib/profile-night-view.svg" alt="3D Contributions" width="92%" />
+  <img src="./profile-3d-contrib/profile-night-view.svg" alt="3D Contributions" width="90%" />
+</div>
+
+<br />
+
+<div align="center">
+
+### GIS · WebGIS · Spatial Intelligence · AI Systems
+
+Exploring geospatial platforms, spatial data engineering, and AI-assisted workflows.
+
 </div>
