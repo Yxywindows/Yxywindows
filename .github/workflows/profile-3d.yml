@@ -23,70 +23,244 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           USERNAME: ${{ github.repository_owner }}
 
-      - name: Hide donut chart and radar chart
+      - name: Apply rolling 6-month window and clean charts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USERNAME: ${{ github.repository_owner }}
         run: |
           python - <<'PY'
           from pathlib import Path
+          import calendar as pycal
+          import json
+          import math
+          import os
+          import re
+          import urllib.request
           import xml.etree.ElementTree as ET
+          from datetime import date, datetime
 
-          # Keep SVG tags unprefixed for GitHub image previews.
-          ET.register_namespace("", "http://www.w3.org/2000/svg")
-          ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+          SVG_NS = "http://www.w3.org/2000/svg"
+          XLINK_NS = "http://www.w3.org/1999/xlink"
+          ET.register_namespace("", SVG_NS)
+          ET.register_namespace("xlink", XLINK_NS)
 
-          def local_name(tag):
-              return tag.split("}", 1)[-1] if "}" in tag else tag
-
+          token = os.environ["GITHUB_TOKEN"]
+          username = os.environ["USERNAME"]
+          width = 1280
+          dx = width / 64
+          dy = dx * math.tan(math.radians(30))
           radar_keywords = {"Commit", "Issue", "PullReq", "Review", "Repo"}
 
+          def local_name(tag: str) -> str:
+              return tag.split("}", 1)[-1] if "}" in tag else tag
+
+          def subtract_months(dt: date, months: int) -> date:
+              year = dt.year
+              month = dt.month - months
+              while month <= 0:
+                  month += 12
+                  year -= 1
+              day = min(dt.day, pycal.monthrange(year, month)[1])
+              return date(year, month, day)
+
+          def iso_day(value: date) -> str:
+              return value.isoformat() + "T00:00:00Z"
+
+          def fetch_calendars():
+              today = datetime.utcnow().date()
+              start = subtract_months(today, 6)
+              query = """
+              query($login: String!, $from: DateTime!, $to: DateTime!) {
+                user(login: $login) {
+                  full: contributionsCollection {
+                    contributionCalendar {
+                      weeks {
+                        contributionDays {
+                          contributionCount
+                          date
+                        }
+                      }
+                    }
+                  }
+                  recent: contributionsCollection(from: $from, to: $to) {
+                    contributionCalendar {
+                      weeks {
+                        contributionDays {
+                          contributionCount
+                          date
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              """
+              payload = json.dumps({
+                  "query": query,
+                  "variables": {
+                      "login": username,
+                      "from": iso_day(start),
+                      "to": iso_day(today),
+                  },
+              }).encode("utf-8")
+
+              req = urllib.request.Request(
+                  "https://api.github.com/graphql",
+                  data=payload,
+                  headers={
+                      "Authorization": f"bearer {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "github-profile-3d-custom",
+                  },
+              )
+
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode("utf-8"))
+
+              if "errors" in data:
+                  raise RuntimeError(data["errors"][0]["message"])
+
+              def flatten(calendar):
+                  days = []
+                  counts = []
+                  for week in calendar["weeks"]:
+                      for day in week["contributionDays"]:
+                          d = datetime.fromisoformat(day["date"].replace("Z", "+00:00")).date()
+                          days.append(d)
+                          counts.append(int(day["contributionCount"]))
+                  return days, counts
+
+              full_days, full_counts = flatten(
+                  data["data"]["user"]["full"]["contributionCalendar"]
+              )
+              recent_days, recent_counts = flatten(
+                  data["data"]["user"]["recent"]["contributionCalendar"]
+              )
+              return full_days, full_counts, recent_days, recent_counts
+
+          def sunday_dow(d: date) -> int:
+              return (d.weekday() + 1) % 7
+
+          def sunday_of_week(d: date) -> date:
+              return d.fromordinal(d.toordinal() - sunday_dow(d))
+
+          def week_count(days):
+              if not days:
+                  return 0
+              return math.ceil((len(days) + sunday_dow(days[0])) / 7)
+
+          def find_calendar_group(root):
+              best = None
+              best_score = -1
+              for elem in root:
+                  if local_name(elem.tag) != "g":
+                      continue
+                  score = 0
+                  for child in list(elem):
+                      if local_name(child.tag) != "g":
+                          continue
+                      rect_count = sum(1 for node in child.iter() if local_name(node.tag) == "rect")
+                      if rect_count >= 3:
+                          score += 1
+                  if score > best_score:
+                      best_score = score
+                      best = elem
+              if best is None or best_score < 100:
+                  raise ValueError(f"Calendar group not found, best score={best_score}")
+              return best
+
+          def find_stats_group(root, calendar_group):
+              date_re = re.compile(r"\d{4}-\d{2}-\d{2} / \d{4}-\d{2}-\d{2}")
+              for elem in root:
+                  if elem is calendar_group or local_name(elem.tag) != "g":
+                      continue
+                  texts = ["".join(node.itertext()).strip() for node in list(elem) if local_name(node.tag) == "text"]
+                  if any(date_re.fullmatch(t) for t in texts):
+                      return elem
+              raise ValueError("Stats group not found")
+
+          def clean_extra_groups(root):
+              groups_to_remove = []
+              for elem in root.iter():
+                  if local_name(elem.tag) != "g":
+                      continue
+                  texts = []
+                  for sub in elem.iter():
+                      if local_name(sub.tag) == "text":
+                          txt = "".join(sub.itertext()).strip()
+                          if txt:
+                              texts.append(txt)
+                  text_set = set(texts)
+                  transform = elem.attrib.get("transform", "")
+                  if transform == "translate(40, 520)" or "other" in text_set:
+                      groups_to_remove.append(elem)
+                      continue
+                  if radar_keywords.issubset(text_set):
+                      groups_to_remove.append(elem)
+                      continue
+
+              parent_map = {child: parent for parent in root.iter() for child in parent}
+              removed = set()
+              for elem in groups_to_remove:
+                  if elem in removed:
+                      continue
+                  parent = parent_map.get(elem)
+                  if parent is not None:
+                      parent.remove(elem)
+                      removed.add(elem)
+
+          full_days, full_counts, recent_days, recent_counts = fetch_calendars()
+
+          if not full_days or not recent_days:
+              raise ValueError("Contribution calendar data is empty")
+
+          recent_total = sum(recent_counts)
+          recent_start = recent_days[0]
+          recent_end = recent_days[-1]
+          removed_weeks = (sunday_of_week(recent_start) - sunday_of_week(full_days[0])).days // 7
+          new_weekcount = week_count(recent_days)
+          orig_weekcount = week_count(full_days)
+          delta_x = -removed_weeks * dx
+          delta_y = (orig_weekcount - new_weekcount - removed_weeks) * dy
+          period_text = f"{recent_start.isoformat()} / {recent_end.isoformat()}"
+
           for file in Path("profile-3d-contrib").glob("*.svg"):
-              try:
-                  tree = ET.parse(file)
-                  root = tree.getroot()
-                  if root.tag != "{http://www.w3.org/2000/svg}svg":
-                      raise ValueError(f"Not a valid SVG root: {file}")
-                  parent_map = {child: parent for parent in root.iter() for child in parent}
+              tree = ET.parse(file)
+              root = tree.getroot()
 
-                  groups_to_remove = []
+              if root.tag != f"{{{SVG_NS}}}svg":
+                  raise ValueError(f"Not a valid SVG root: {file}")
 
-                  for elem in root.iter():
-                      if local_name(elem.tag) != "g":
-                          continue
+              clean_extra_groups(root)
 
-                      texts = []
-                      for sub in elem.iter():
-                          if local_name(sub.tag) == "text":
-                              txt = "".join(sub.itertext()).strip()
-                              if txt:
-                                  texts.append(txt)
+              calendar_group = find_calendar_group(root)
+              bar_groups = [child for child in list(calendar_group) if local_name(child.tag) == "g"]
 
-                      text_set = set(texts)
-                      transform = elem.attrib.get("transform", "")
+              if len(bar_groups) < len(recent_days):
+                  raise ValueError(
+                      f"Not enough bar groups in {file}: {len(bar_groups)} < {len(recent_days)}"
+                  )
 
-                      # 1) 删除左下角 donut 区块
-                      if transform == "translate(40, 520)" or "other" in text_set:
-                          groups_to_remove.append(elem)
-                          continue
+              for child in bar_groups[:-len(recent_days)]:
+                  calendar_group.remove(child)
 
-                      # 2) 删除右上角雷达图区块
-                      if radar_keywords.issubset(text_set):
-                          groups_to_remove.append(elem)
-                          continue
+              calendar_group.set(
+                  "transform",
+                  f"translate({delta_x:.3f} {delta_y:.3f})",
+              )
 
-                  # 实际移除
-                  removed = set()
-                  for elem in groups_to_remove:
-                      if elem in removed:
-                          continue
-                      parent = parent_map.get(elem)
-                      if parent is not None:
-                          parent.remove(elem)
-                          removed.add(elem)
+              stats_group = find_stats_group(root, calendar_group)
+              direct_texts = [child for child in list(stats_group) if local_name(child.tag) == "text"]
 
-                  tree.write(file, encoding="utf-8", xml_declaration=False)
-                  print(f"Processed: {file}")
-              except Exception as e:
-                  print(f"Failed: {file} -> {e}")
-                  raise
+              for text_node in direct_texts:
+                  text_value = "".join(text_node.itertext()).strip()
+                  if text_node.attrib.get("text-anchor") == "end" and text_node.attrib.get("y") == "830":
+                      text_node.text = f"{recent_total:,}"
+                  elif re.fullmatch(r"\d{4}-\d{2}-\d{2} / \d{4}-\d{2}-\d{2}", text_value):
+                      text_node.text = period_text
+
+              tree.write(file, encoding="utf-8", xml_declaration=False)
+              print(f"Processed: {file.name} -> last 6 months ({period_text})")
           PY
 
       - name: Commit and Push
