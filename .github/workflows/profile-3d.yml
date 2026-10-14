@@ -1,6 +1,10 @@
 name: GitHub-Profile-3D-Contrib
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/profile-3d.yml"
   workflow_dispatch:
   schedule:
     - cron: "0 18 * * *"
@@ -25,6 +29,10 @@ jobs:
           from pathlib import Path
           import xml.etree.ElementTree as ET
 
+          # Keep SVG tags unprefixed for GitHub image previews.
+          ET.register_namespace("", "http://www.w3.org/2000/svg")
+          ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+
           def local_name(tag):
               return tag.split("}", 1)[-1] if "}" in tag else tag
 
@@ -34,6 +42,8 @@ jobs:
               try:
                   tree = ET.parse(file)
                   root = tree.getroot()
+                  if root.tag != "{http://www.w3.org/2000/svg}svg":
+                      raise ValueError(f"Not a valid SVG root: {file}")
                   parent_map = {child: parent for parent in root.iter() for child in parent}
 
                   groups_to_remove = []
@@ -76,6 +86,7 @@ jobs:
                   print(f"Processed: {file}")
               except Exception as e:
                   print(f"Failed: {file} -> {e}")
+                  raise
           PY
 
       - name: Commit and Push
