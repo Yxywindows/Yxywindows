@@ -19,23 +19,63 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           USERNAME: ${{ github.repository_owner }}
 
-      - name: Hide language donut chart
+      - name: Hide donut chart and radar chart
         run: |
           python - <<'PY'
           from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          def local_name(tag):
+              return tag.split("}", 1)[-1] if "}" in tag else tag
+
+          radar_keywords = {"Commit", "Issue", "PullReq", "Review", "Repo"}
 
           for file in Path("profile-3d-contrib").glob("*.svg"):
-              svg = file.read_text(encoding="utf-8")
-              if '<g transform="translate(40, 520)">' not in svg:
-                  continue
+              try:
+                  tree = ET.parse(file)
+                  root = tree.getroot()
+                  parent_map = {child: parent for parent in root.iter() for child in parent}
 
-              css = '''
-              g[transform="translate(40, 520)"] {
-                  display: none !important;
-              }
-              '''
-              svg = svg.replace("</style>", css + "</style>", 1)
-              file.write_text(svg, encoding="utf-8")
+                  groups_to_remove = []
+
+                  for elem in root.iter():
+                      if local_name(elem.tag) != "g":
+                          continue
+
+                      texts = []
+                      for sub in elem.iter():
+                          if local_name(sub.tag) == "text":
+                              txt = "".join(sub.itertext()).strip()
+                              if txt:
+                                  texts.append(txt)
+
+                      text_set = set(texts)
+                      transform = elem.attrib.get("transform", "")
+
+                      # 1) 删除左下角 donut 区块
+                      if transform == "translate(40, 520)" or "other" in text_set:
+                          groups_to_remove.append(elem)
+                          continue
+
+                      # 2) 删除右上角雷达图区块
+                      if radar_keywords.issubset(text_set):
+                          groups_to_remove.append(elem)
+                          continue
+
+                  # 实际移除
+                  removed = set()
+                  for elem in groups_to_remove:
+                      if elem in removed:
+                          continue
+                      parent = parent_map.get(elem)
+                      if parent is not None:
+                          parent.remove(elem)
+                          removed.add(elem)
+
+                  tree.write(file, encoding="utf-8", xml_declaration=False)
+                  print(f"Processed: {file}")
+              except Exception as e:
+                  print(f"Failed: {file} -> {e}")
           PY
 
       - name: Commit and Push
