@@ -1,1 +1,1 @@
-**![3D Contributions](./profile-3d-contrib/profile-night-view.svg)**
+![3D Contributions](./profile-3d-contrib/profile-night-rainbow.svg)
