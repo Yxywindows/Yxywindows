@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/gis-banner.png" alt="GIS Banner" width="100%" />
+  <img src="./assets/white_background.png" alt="GIS Banner" width="100%" />
 </div>
 
 <br />
